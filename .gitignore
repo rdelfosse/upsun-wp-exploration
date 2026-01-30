@@ -1,0 +1,57 @@
+# Dependencies
+/vendor/
+node_modules/
+
+# WordPress
+wp-content/uploads/
+wp-content/upgrade/
+wp-content/cache/
+*.log
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE & Editors
+.idea/
+.vscode/
+*.sublime-*
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build & Cache
+/dist/
+/.cache/
+*.cache
+
+# Local development
+*.local
+*.local.*
+docker-compose.override.yml
+
+# AI Assistants & Coding Agents
+.cursor/
+.cursorrules
+.copilot/
+.github/copilot-instructions.md
+.vibe/
+.claude/
+CLAUDE.md
+.codex/
+.kimi/
+.cody/
+.codeium/
+.windsurf/
+.tabnine/
+.codewhisperer/
+.continue/
+.aider*
+.replit
+.bolt/
+.devin/

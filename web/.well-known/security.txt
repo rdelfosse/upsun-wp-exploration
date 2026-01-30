@@ -1,0 +1,24 @@
+# Security Policy for this WordPress installation
+# See https://securitytxt.org/ for the standard specification
+
+# Contact for security issues (REQUIRED - customize this)
+Contact: mailto:security@example.com
+# Contact: https://example.com/security/report
+
+# When this file expires (REQUIRED - update annually)
+Expires: 2027-01-01T00:00:00.000Z
+
+# Preferred language for security reports
+Preferred-Languages: en, fr
+
+# Canonical URL for this file
+# Canonical: https://example.com/.well-known/security.txt
+
+# Security policy page (optional)
+# Policy: https://example.com/security-policy
+
+# Acknowledgments page (optional)
+# Acknowledgments: https://example.com/security/thanks
+
+# Hiring security professionals (optional)
+# Hiring: https://example.com/careers
