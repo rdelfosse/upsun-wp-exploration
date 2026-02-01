@@ -126,24 +126,31 @@ applications:
 
             # === VERSION DISCLOSURE PROTECTION ===
             # Block files that reveal WordPress version (readme.html, license.txt, etc.)
-            '^(?:/wp)?/(?:readme|license|changelog|-config|-sample)\.(?:html|txt|php)$':
+            # Note: No $ anchor to match with or without trailing slash
+            '^(?:/wp)?/(?:readme|license|changelog|-config|-sample)\.(?:html|txt|php)':
               allow: false
 
             # === WORDPRESS ADMIN PROTECTION ===
 
-            # Block wp-login.php (use secret path instead)
-            '^/wp/wp-login\.php$':
+            # Block ALL wp-login.php access (use secret path instead)
+            '^/wp/wp-login\.php':
+              allow: false
+            '^/wp-login\.php':
               allow: false
 
-            # Block install/upgrade scripts (not needed after deployment, potential attack vectors)
-            '^/wp/wp-admin/(install|upgrade)\.php$':
+            # Block fake wp-admin at root (doesn't exist in Bedrock, returns empty page)
+            '^/wp-admin':
+              allow: false
+
+            # Block install/upgrade scripts (not needed after deployment)
+            '^/wp/wp-admin/(install|upgrade)\.php':
               allow: false
 
             # Block XML-RPC completely
-            '^/wp/xmlrpc\.php$':
+            '^/wp/xmlrpc\.php':
               allow: false
 
-            '^/xmlrpc\.php$':
+            '^/xmlrpc\.php':
               allow: false
 
             # Block User Enumeration (REST API)
@@ -187,7 +194,7 @@ applications:
       wordpress:
         spec: "*/5 * * * *"
         commands:
-          start: "cd web/wp && wp cron event run --due-now --quiet"
+          start: "wp cron event run --due-now --quiet"
 
     # =========================================================================
     # DEPLOYMENT HOOKS
@@ -241,12 +248,13 @@ applications:
 
         echo "🚀 [DEPLOY] Starting Bedrock deployment..."
 
+        # Suppress WP-CLI config warnings for Bedrock structure
+        export WP_CLI_SUPPRESS_GLOBAL_PARAMS=1
+
         # Get site URL for WP-CLI commands
         export SITE_URL=$(echo $PLATFORM_ROUTES | base64 --decode | jq -r 'to_entries[] | select(.value.primary) | .key' | sed 's/\/$//')
 
-        cd web/wp
-
-        # STEP 1: WordPress Core Install
+        # STEP 1: WordPress Core Install (WP-CLI uses wp-cli.yml for path)
         if ! wp core is-installed --quiet 2>/dev/null; then
             echo "📦 [1/3] Installing WordPress Core (${WP_LOCALE:-en_US})..."
 
@@ -273,20 +281,10 @@ applications:
         echo "🔄 [3/3] Checking database..."
         wp core update-db --quiet || true
 
-        # STEP 2: Activate Components
-        # echo "🔌 Activating components..."
-
-        # Example: Activate generic plugins if present
-        # if wp plugin list --field=name | grep -q "^woocommerce$"; then
-        #     wp plugin activate woocommerce --quiet || echo "⚠️  woocommerce activation failed"
-        # fi
-
-        # STEP 3: Update Translations
+        # Update Translations
         echo "🌍 Updating translations..."
         wp language core update --quiet || true
         wp language plugin update --all --quiet || true
-        wp language theme update --all --quiet || true
-
         wp language theme update --all --quiet || true
 
         echo "✅ Deploy phase completed"
@@ -297,9 +295,7 @@ applications:
 
         echo "🔄 [POST-DEPLOY] Starting post-deployment tasks..."
 
-        cd web/wp
-
-        # Integrity Check (Security)
+        # Integrity Check (Security) - WP-CLI uses wp-cli.yml for path
         echo "🔍 Checking WordPress Core integrity..."
         if wp core verify-checksums --quiet; then
             echo "✅ Core integrity verified"

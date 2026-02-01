@@ -58,7 +58,7 @@ if (isset($_SERVER['HTTP_USER_AGENT'])) {
     }
     // 3. ALLOWLIST: Legitimate services (webhooks, APIs, WordPress, AI crawlers, etc.)
     // Organized by category for maintainability
-    $allowlist = [
+    elseif (preg_match('/' . implode('|', [
         // CMS & Platforms
         'wordpress', 'jetpack', 'woocommerce',
         // Payments
@@ -85,10 +85,7 @@ if (isset($_SERVER['HTTP_USER_AGENT'])) {
         'semrush', 'ahrefs', 'moz', 'screaming frog',
         // Feeds & Archives
         'feedly', 'flipboard', 'feedbin', 'archive\.org', 'ia_archiver', 'ccbot',
-    ];
-    $allowlist_pattern = '/' . implode('|', $allowlist) . '/i';
-
-    elseif (preg_match($allowlist_pattern, $ua)) {
+    ]) . '/i', $ua)) {
         // Allow known good services
     }
     // 4. BLOCKLIST: Known malicious scanners and tools
@@ -107,6 +104,40 @@ if (isset($_SERVER['HTTP_USER_AGENT'])) {
         exit;
     }
     // 5. DEFAULT: Allow through (fail-open)
+}
+
+/**
+ * 0.3 Path Filtering (Stealth 404)
+ * Block sensitive WordPress paths before WordPress handles them.
+ * Returns 404 to avoid fingerprinting.
+ */
+$request_path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+
+// Paths to block with 404 (stealth mode)
+$blocked_paths = [
+    // Root-level fake paths (don't exist in Bedrock but scanners try them)
+    '#^/wp-admin(/|$)#',           // /wp-admin at root
+    '#^/wp-login\.php#',           // /wp-login.php at root
+    '#^/xmlrpc\.php#',             // /xmlrpc.php at root (real one is /wp/xmlrpc.php)
+
+    // Install/upgrade scripts (never needed after deployment)
+    '#^/wp/wp-admin/install\.php#',
+    '#^/wp/wp-admin/upgrade\.php#',
+
+    // Version disclosure files
+    '#^(/wp)?/readme\.html#i',
+    '#^(/wp)?/license\.txt#i',
+    '#^(/wp)?/wp-config-sample\.php#i',
+];
+
+// Check each blocked path pattern
+foreach ($blocked_paths as $pattern) {
+    if (preg_match($pattern, $request_path)) {
+        http_response_code(404);
+        header('X-Robots-Tag: noindex, nofollow', true);
+        echo '<!DOCTYPE html><html><head><title>404 Not Found</title></head><body><h1>Not Found</h1></body></html>';
+        exit;
+    }
 }
 
 /**
@@ -1311,9 +1342,33 @@ add_action('parse_request', function ($wp) {
     }
 });
 
-// 4. Block Direct Access to wp-login.php
+// 4. Block Direct Access to wp-login.php and wp-admin for unauthenticated users
 add_action('init', function () {
     $secret_slug = getenv('WP_ADMIN_SECRET_PATH');
+    $request_uri = $_SERVER['REQUEST_URI'] ?? '';
+
+    // Block /wp/wp-admin/* for unauthenticated visitors (stealth 404 for scanners)
+    // Check if accessing wp-admin and no WordPress auth cookie present
+    if (preg_match('#^/wp/wp-admin(?:/|$)#', $request_uri)) {
+        // Check for WordPress login cookie (basic presence check)
+        $has_auth_cookie = false;
+        foreach ($_COOKIE as $name => $value) {
+            if (strpos($name, 'wordpress_logged_in_') === 0) {
+                $has_auth_cookie = true;
+                break;
+            }
+        }
+
+        // No auth cookie = scanner or unauthenticated visitor → 404
+        if (!$has_auth_cookie) {
+            status_header(404);
+            nocache_headers();
+            echo '<!DOCTYPE html><html><head><title>404 Not Found</title></head><body><h1>Not Found</h1></body></html>';
+            exit;
+        }
+    }
+
+    // Block direct wp-login.php access if secret path is configured
     if (!$secret_slug) {
         // Fail-secure: Log warning in production if protection is disabled
         if (upsun_is_production()) {

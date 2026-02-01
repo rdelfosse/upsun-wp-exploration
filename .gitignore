@@ -1,14 +1,34 @@
-# Dependencies
+# =============================================================================
+# WordPress Bedrock .gitignore
+# =============================================================================
+
+# Composer
 /vendor/
-node_modules/
 
-# WordPress
-wp-content/uploads/
-wp-content/upgrade/
-wp-content/cache/
-*.log
+# WordPress core (installed via Composer)
+/web/wp/
 
-# Environment
+# WordPress content directories managed by Composer
+/web/app/plugins/*
+!/web/app/plugins/.gitkeep
+/web/app/themes/*
+!/web/app/themes/.gitkeep
+
+# Must-use plugins installed via Composer (keep custom ones)
+/web/app/mu-plugins/*/
+!/web/app/mu-plugins/health-check.php
+!/web/app/mu-plugins/upsun-security.php
+
+# Uploads (managed by Upsun mounts)
+/web/app/uploads/
+
+# Cache
+/web/app/cache/
+
+# WordPress upgrade files
+/web/app/upgrade/
+
+# Environment files (never commit secrets!)
 .env
 .env.*
 !.env.example
@@ -16,42 +36,23 @@ wp-content/cache/
 # IDE & Editors
 .idea/
 .vscode/
-*.sublime-*
 *.swp
 *.swo
 *~
 
-# OS
+# OS Files
 .DS_Store
 Thumbs.db
+Desktop.ini
+nul
 
-# Build & Cache
-/dist/
-/.cache/
-*.cache
+# Logs
+*.log
+/web/app/debug.log
+
+# Node (if using build tools)
+node_modules/
 
 # Local development
 *.local
-*.local.*
-docker-compose.override.yml
-
-# AI Assistants & Coding Agents
-.cursor/
-.cursorrules
-.copilot/
-.github/copilot-instructions.md
-.vibe/
-.claude/
-CLAUDE.md
-.codex/
-.kimi/
-.cody/
-.codeium/
-.windsurf/
-.tabnine/
-.codewhisperer/
-.continue/
-.aider*
-.replit
-.bolt/
-.devin/
+.wp-cli/
