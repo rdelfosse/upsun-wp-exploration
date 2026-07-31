@@ -17,6 +17,47 @@ if (!getenv('PLATFORM_APPLICATION')) {
  */
 
 /**
+ * Constant-time check of the developer bypass token.
+ *
+ * Two changes from the previous inline comparison:
+ *
+ * 1. `hash_equals()` instead of `===`. String comparison short-circuits on the
+ *    first differing byte, which leaks the length of the common prefix through
+ *    response timing. Remote timing attacks over HTTP are noisy and hard, but
+ *    the fix is free.
+ *
+ * 2. A dedicated secret. The bypass used to reuse WP_ADMIN_SECRET_PATH, which
+ *    is also the login URL segment. URLs leak — through Referer headers, browser
+ *    history, proxy and CDN logs, and anything that records a full URL. Sharing
+ *    one secret between a value that leaks by design and a header that grants
+ *    WAF bypass means the first leak hands over the second.
+ *
+ * WP_ADMIN_SECRET_PATH is still accepted as a fallback so existing deployments
+ * keep working, but it emits a notice: set WP_DEV_BYPASS_TOKEN instead.
+ */
+function upsun_dev_bypass_valid()
+{
+    $provided = $_SERVER['HTTP_X_DEV_PASS'] ?? '';
+    if ($provided === '') {
+        return false;
+    }
+
+    $expected = getenv('WP_DEV_BYPASS_TOKEN');
+    if (!$expected) {
+        $expected = getenv('WP_ADMIN_SECRET_PATH');
+        if ($expected) {
+            error_log(
+                '[SECURITY] X-Dev-Pass is falling back to WP_ADMIN_SECRET_PATH. '
+                . 'Set WP_DEV_BYPASS_TOKEN to a separate value: the login URL segment '
+                . 'leaks through Referer headers and proxy logs.'
+            );
+        }
+    }
+
+    return $expected && hash_equals((string) $expected, (string) $provided);
+}
+
+/**
  * 0.1 HTTP Method Filtering
  * Block dangerous/unused HTTP methods that can be exploited
  */
@@ -49,11 +90,7 @@ if (isset($_SERVER['HTTP_USER_AGENT'])) {
     }
     // 2. BYPASS: Secret header present (admin/dev access)
     // Usage: curl -H "X-Dev-Pass: your_secret" https://...
-    elseif (
-        getenv('WP_ADMIN_SECRET_PATH') &&
-        isset($_SERVER['HTTP_X_DEV_PASS']) &&
-        $_SERVER['HTTP_X_DEV_PASS'] === getenv('WP_ADMIN_SECRET_PATH')
-    ) {
+    elseif (upsun_dev_bypass_valid()) {
         // Allow with valid dev pass
     }
     // 3. ALLOWLIST: Legitimate services (webhooks, APIs, WordPress, AI crawlers, etc.)
@@ -1285,81 +1322,111 @@ add_filter('upsun_hotlink_allowed', function ($hosts) {
 
 /**
  * =============================================================================
- * SECRET ADMIN PATH (Rewrite Implementation)
+ * SECRET ADMIN PATH (Direct URI Interception)
  * =============================================================================
+ *
+ * Previously implemented with add_rewrite_rule(). That had two failure modes,
+ * both ending in a full admin lockout with no way back in through the browser:
+ *
+ * 1. Rewrite rules are only consulted when permalinks are NOT set to "plain".
+ *    On a plain-permalink site the secret rule never fires — while the
+ *    wp-login.php block below still applies. Login page 404s, secret path 404s.
+ *
+ * 2. add_rewrite_rule() only registers the rule in memory. It has to be flushed
+ *    to be written to the `rewrite_rules` option. Right after a deploy the
+ *    secret URL therefore 404s until someone saves Settings > Permalinks —
+ *    which requires being logged in, which requires the secret URL.
+ *
+ * Matching REQUEST_URI directly removes the dependency on a setting that an
+ * administrator can change without realising it unlocks the login page, and
+ * needs no flush.
  */
 
-// 1. Add Query Var
-add_filter('query_vars', function ($vars) {
-    $vars[] = 'upsun_secret_login';
-    return $vars;
-});
+/**
+ * Requested path, without query string or trailing slash.
+ */
+function upsun_request_path()
+{
+    $uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
+    return trim((string) $uri, '/');
+}
 
-// 2. Add Rewrite Rule (on Init)
+/**
+ * Login interception, admin stealth, and direct-access blocking.
+ *
+ * Priority 0 on `init`: nothing else should run before the decision.
+ */
 add_action('init', function () {
     $secret_slug = getenv('WP_ADMIN_SECRET_PATH');
-    if (!$secret_slug)
+
+    if (!$secret_slug) {
+        // Fail-open, and say so. Silently leaving the login page exposed while
+        // the code suggests it is protected is worse than not having the
+        // feature at all.
+        if (upsun_is_production()) {
+            error_log('[SECURITY] WP_ADMIN_SECRET_PATH is not set. Login page is publicly accessible.');
+        }
         return;
+    }
 
-    // Map /<secret> to index.php?upsun_secret_login=1
-    add_rewrite_rule(
-        '^' . preg_quote($secret_slug, '/') . '/?$',
-        'index.php?upsun_secret_login=1',
-        'top'
-    );
-});
+    // 1. The secret segment serves the login page.
+    if (upsun_request_path() === trim($secret_slug, '/')) {
 
-// 3. Handle the Login Load
-add_action('parse_request', function ($wp) {
-    if (isset($wp->query_vars['upsun_secret_login']) && $wp->query_vars['upsun_secret_login'] == 1) {
-
-        // --- IP WHITELIST CHECK (with CIDR) ---
+        // --- IP ALLOWLIST (with CIDR) ---
         $allowed_ips_env = getenv('WP_ADMIN_ALLOWED_IPS');
         if ($allowed_ips_env) {
-            $allowed_ranges = array_map('trim', explode(',', $allowed_ips_env));
             $client_ip = upsun_get_real_ip();
             $allowed = false;
-
-            foreach ($allowed_ranges as $range) {
+            foreach (array_map('trim', explode(',', $allowed_ips_env)) as $range) {
                 if (upsun_ip_in_range($client_ip, $range)) {
                     $allowed = true;
                     break;
                 }
             }
-
             if (!$allowed) {
                 error_log("[SECURITY] Blocked IP $client_ip (Allowed: $allowed_ips_env)");
                 wp_die('Unauthorized IP address.', 'Forbidden', ['response' => 403]);
             }
         }
 
-        // Mark this as a legitimate secret path access (cannot be forged via GET/POST)
+        // A constant, not a request parameter: a visitor cannot forge it to get
+        // past the wp-login.php block below.
         define('UPSUN_SECRET_LOGIN_ACTIVE', true);
 
-        // Load wp-login.php explicitly
         require_once ABSPATH . 'wp-login.php';
         exit;
     }
-});
 
-// 4. Block Direct Access to wp-login.php and wp-admin for unauthenticated users
-add_action('init', function () {
-    $secret_slug = getenv('WP_ADMIN_SECRET_PATH');
-    $request_uri = $_SERVER['REQUEST_URI'] ?? '';
+    global $pagenow;
 
-    // Block /wp/wp-admin/* for unauthenticated visitors (stealth 404 for scanners)
-    // Check if accessing wp-admin and no WordPress auth cookie present
-    if (preg_match('#^/wp/wp-admin(?:/|$)#', $request_uri)) {
-        // Check for WordPress login cookie (basic presence check)
+    // 2. Direct wp-login.php access: do not confirm the page exists.
+    if ($pagenow === 'wp-login.php' && !defined('UPSUN_SECRET_LOGIN_ACTIVE')) {
+        status_header(404);
+        nocache_headers();
+        echo '<!DOCTYPE html><html><head><title>404 Not Found</title></head><body><h1>Not Found</h1></body></html>';
+        exit;
+    }
+
+    // 3. Admin area without a session cookie. A legitimate visitor never lands
+    //    there without having logged in; a scanner does.
+    //
+    //    admin-ajax.php and admin-post.php stay reachable: plugins use them for
+    //    unauthenticated front-end requests, and closing them breaks features
+    //    without protecting anything — both already run their own capability
+    //    checks.
+    if (is_admin() && !wp_doing_ajax() && !wp_doing_cron()) {
+        if (in_array($pagenow, ['admin-ajax.php', 'admin-post.php'], true)) {
+            return;
+        }
+
         $has_auth_cookie = false;
-        foreach ($_COOKIE as $name => $value) {
+        foreach (array_keys($_COOKIE) as $name) {
             if (strpos($name, 'wordpress_logged_in_') === 0) {
                 $has_auth_cookie = true;
                 break;
             }
         }
 
-        // No auth cookie = scanner or unauthenticated visitor → 404
         if (!$has_auth_cookie) {
             status_header(404);
             nocache_headers();
@@ -1367,25 +1434,21 @@ add_action('init', function () {
             exit;
         }
     }
+}, 0);
 
-    // Block direct wp-login.php access if secret path is configured
-    if (!$secret_slug) {
-        // Fail-secure: Log warning in production if protection is disabled
-        if (upsun_is_production()) {
-            error_log('[SECURITY] WARNING: WP_ADMIN_SECRET_PATH is not set. Login page is publicly accessible.');
-        }
-        return;
+/**
+ * Password-reset and login links must point at the secret segment, otherwise
+ * every reset email sends the user to a 404.
+ */
+add_filter('site_url', function ($url, $path) {
+    $secret_slug = getenv('WP_ADMIN_SECRET_PATH');
+    if ($secret_slug && is_string($path) && strpos($path, 'wp-login.php') === 0) {
+        return str_replace('wp-login.php', trim($secret_slug, '/'), $url);
     }
+    return $url;
+}, 10, 2);
 
-    global $pagenow;
-
-    // If accessing wp-login.php directly AND not via legitimate secret path rewrite
-    // SECURITY: Check constant (unforgeable) instead of GET/POST params (forgeable)
-    if ($pagenow === 'wp-login.php' && !defined('UPSUN_SECRET_LOGIN_ACTIVE')) {
-        // Return 404 Not Found to obscure existence
-        status_header(404);
-        nocache_headers();
-        echo '<!DOCTYPE html><html><head><title>404 Not Found</title></head><body><h1>Not Found</h1></body></html>';
-        exit;
-    }
-}, 1);
+add_filter('lostpassword_url', function ($url) {
+    $secret_slug = getenv('WP_ADMIN_SECRET_PATH');
+    return $secret_slug ? str_replace('wp-login.php', trim($secret_slug, '/'), $url) : $url;
+});
