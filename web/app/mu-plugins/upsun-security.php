@@ -476,48 +476,152 @@ add_action('init', function () {
 
 /**
  * =============================================================================
- * 4. REST API PROTECTION
+ * 4. REST API PROTECTION — closed by default
  * =============================================================================
+ *
+ * WordPress ships /wp-json open to anonymous visitors. That default was already
+ * questionable — /wp/v2/users enumerates accounts, and knowing a valid login is
+ * half a brute-force attack — and wp2shell settled it.
+ *
+ * wp2shell (disclosed 17-18 July 2026) chains CVE-2026-60137, a SQL injection,
+ * with CVE-2026-63030, a route-confusion flaw in the REST batch processor at
+ * /wp-json/batch/v1. Separately they are limited; chained they give
+ * unauthenticated remote code execution. Both entered the CISA Known Exploited
+ * Vulnerabilities catalogue on 21 July 2026. Fixed in WordPress 7.0.2, 6.9.5
+ * and 6.8.6.
+ *
+ * So the default is inverted here: everything is closed to anonymous visitors
+ * unless explicitly opened. Blocking a known-bad list only ever protects against
+ * the endpoints someone thought of; an allowlist fails closed when a new one
+ * appears, whether it ships in core or comes with a plugin.
+ *
+ * Opening an endpoint:
+ *
+ *   WP_REST_PUBLIC_NAMESPACES=myplugin/v1,otherplugin/v2   (env, comma separated)
+ *
+ *   add_filter('upsun_rest_public_namespaces', function ($ns) {
+ *       $ns[] = 'myplugin/v1';
+ *       return $ns;
+ *   });
+ *
+ * Authenticated requests are untouched: this only decides what an anonymous
+ * caller may reach.
  */
 
 /**
- * Restrict sensitive endpoints
+ * Namespaces reachable without authentication.
+ *
+ * `oembed/1.0` is open by default: it is what lets other sites embed yours, it
+ * is read-only, and closing it silently breaks embeds in a way that is hard to
+ * trace back here. Everything else has to be opted in.
+ */
+function upsun_rest_public_namespaces()
+{
+    $namespaces = ['oembed/1.0'];
+
+    $from_env = getenv('WP_REST_PUBLIC_NAMESPACES');
+    if ($from_env) {
+        foreach (explode(',', $from_env) as $ns) {
+            $ns = trim($ns, " 	/");
+            if ($ns !== '') {
+                $namespaces[] = $ns;
+            }
+        }
+    }
+
+    return apply_filters('upsun_rest_public_namespaces', array_unique($namespaces));
+}
+
+/**
+ * The route currently being served, normalised without leading slash.
+ */
+function upsun_current_rest_route()
+{
+    if (!empty($GLOBALS['wp']->query_vars['rest_route'])) {
+        return ltrim((string) $GLOBALS['wp']->query_vars['rest_route'], '/');
+    }
+
+    // Pretty permalinks: /wp-json/<route>
+    $path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH) ?: '';
+    $prefix = '/' . rest_get_url_prefix() . '/';
+    $at = strpos($path, $prefix);
+
+    return false === $at ? '' : ltrim(substr($path, $at + strlen($prefix)), '/');
+}
+
+add_filter('rest_authentication_errors', function ($result) {
+    // Never overwrite an authentication error raised upstream.
+    if (is_wp_error($result) || true === $result) {
+        return $result;
+    }
+
+    if (is_user_logged_in()) {
+        return $result;
+    }
+
+    $route = upsun_current_rest_route();
+
+    foreach (upsun_rest_public_namespaces() as $namespace) {
+        if (strpos($route, trim($namespace, '/')) === 0) {
+            return $result;
+        }
+    }
+
+    return new WP_Error(
+        'rest_closed',
+        'REST API is not available to unauthenticated clients.',
+        ['status' => 401]
+    );
+}, 20);
+
+/**
+ * Remove the batch processor entirely.
+ *
+ * This is the CVE-2026-63030 vector: the batch endpoint validated and executed
+ * sub-requests in two separate loops, and a sub-request whose URL failed to
+ * parse pushed an error into the validation array but not into the matches
+ * array. The arrays desynchronised, and every following sub-request ran under
+ * the wrong handler.
+ *
+ * Core is patched. This site does not use batch requests, so keeping the
+ * endpoint would be accepting risk with no upside — including from whatever
+ * turns up in it next.
+ */
+add_filter('rest_endpoints', function ($endpoints) {
+    foreach (array_keys($endpoints) as $route) {
+        if (strpos($route, '/batch/') === 0) {
+            unset($endpoints[$route]);
+        }
+    }
+    return $endpoints;
+}, PHP_INT_MAX);
+
+/**
+ * Belt and braces on user enumeration.
+ *
+ * The allowlist above already blocks these for anonymous callers. They are
+ * dropped from the route table as well so that they disappear from the
+ * discovery index rather than merely returning 401 — a 401 confirms the route
+ * exists, which is itself worth knowing to an attacker.
  */
 add_filter('rest_endpoints', function ($endpoints) {
     if (is_user_logged_in()) {
         return $endpoints;
     }
 
-    // Endpoints to block for visitors
-    $restricted = [
-        '/wp/v2/users',
-        '/wp/v2/users/(?P<id>[\d]+)',
-        '/wp/v2/settings',
-    ];
-
-    foreach ($restricted as $endpoint) {
-        if (isset($endpoints[$endpoint])) {
-            unset($endpoints[$endpoint]);
-        }
+    foreach (['/wp/v2/users', '/wp/v2/users/(?P<id>[\d]+)', '/wp/v2/settings'] as $route) {
+        unset($endpoints[$route]);
     }
 
     return $endpoints;
 });
 
 /**
- * Optional: Completely disable REST API for non-logged users
- * Uncomment if you don't use the API publicly
+ * Drop the REST discovery link from the head and headers. It is only useful to
+ * a client that already knows it wants the API.
  */
-// add_filter('rest_authentication_errors', function($result) {
-//     if (!is_user_logged_in()) {
-//         return new WP_Error(
-//             'rest_disabled',
-//             'REST API disabled for visitors.',
-//             ['status' => 401]
-//         );
-//     }
-//     return $result;
-// });
+remove_action('wp_head', 'rest_output_link_wp_head');
+remove_action('template_redirect', 'rest_output_link_header', 11);
 
 /**
  * =============================================================================
